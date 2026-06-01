@@ -25,9 +25,9 @@
   "action": {
     "default_title": "Hatchett Torque — Open Dashboard",
     "default_icon": {
-      "16":  "icons/icon16.png",
-      "48":  "icons/icon48.png",
-      "128": "icons/icon128.png"
+      "16":  "icon16.png",
+      "48":  "icon48.png",
+      "128": "icon128.png"
     }
   },
 
@@ -47,14 +47,14 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["icons/*"],
+      "resources": ["icon16.png", "icon48.png", "icon128.png"],
       "matches": ["https://www.facebook.com/*"]
     }
   ],
 
   "icons": {
-    "16":  "icons/icon16.png",
-    "48":  "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "16":  "icon16.png",
+    "48":  "icon48.png",
+    "128": "icon128.png"
   }
 }
