@@ -1,0 +1,61 @@
+{
+  "manifest_version": 3,
+  "name": "Hatchett Torque",
+  "version": "1.0.0",
+  "description": "Premium automotive inventory deployment to Facebook Marketplace — by Hatchett Automotive.",
+  "author": "Hatchett Automotive",
+
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "http://autohiveinventory.infinityfree.me/*",
+    "https://autohiveinventory.infinityfree.me/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_title": "Hatchett Torque — Open Dashboard",
+    "default_icon": {
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "options_ui": {
+    "page": "dashboard.html",
+    "open_in_tab": true
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://www.facebook.com/marketplace/create/item*"],
+      "js": ["aiCopywriter.js", "content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["https://www.facebook.com/*"]
+    }
+  ],
+
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

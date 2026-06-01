@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hatchett Torque — Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css" />
+  <!-- Inter font via Google Fonts CDN for premium typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ── Header ──────────────────────────────────────────────── -->
+    <header id="header">
+      <div id="header-brand">
+        <div id="header-logo">⚡</div>
+        <div id="header-title">
+          <h1>Hatchett Torque</h1>
+          <span>Inventory Deployment Engine</span>
+        </div>
+      </div>
+
+      <div id="header-actions">
+        <span id="cache-timestamp"></span>
+
+        <button class="btn btn-secondary" id="btn-refresh" title="Re-fetch feed from source">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+          Refresh Feed
+        </button>
+
+        <button class="btn btn-primary" id="btn-post-all" title="Queue and post all eligible inventory">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Post All Inventory
+        </button>
+      </div>
+    </header>
+
+    <!-- ── Stats bar ────────────────────────────────────────────── -->
+    <section id="stats-bar">
+      <div class="stat-card stat-total">
+        <div class="stat-card-value" id="stat-total">—</div>
+        <div class="stat-card-label">Total Vehicles</div>
+      </div>
+      <div class="stat-card stat-active">
+        <div class="stat-card-value" id="stat-active">—</div>
+        <div class="stat-card-label">Active Listings</div>
+      </div>
+      <div class="stat-card stat-staged">
+        <div class="stat-card-value" id="stat-staged">—</div>
+        <div class="stat-card-label">Staged</div>
+      </div>
+      <div class="stat-card stat-oos">
+        <div class="stat-card-value" id="stat-oos">—</div>
+        <div class="stat-card-label">Sold / OOS</div>
+      </div>
+    </section>
+
+    <!-- ── Bulk post progress banner ────────────────────────────── -->
+    <div id="queue-banner">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      <span id="queue-label">Queue running…</span>
+      <div id="queue-progress-track">
+        <div id="queue-progress-fill" style="width:0%"></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btn-cancel-queue">Cancel</button>
+    </div>
+
+    <!-- ── Toolbar ───────────────────────────────────────────────── -->
+    <div id="toolbar">
+      <div id="search-wrap">
+        <span id="search-icon">🔍</span>
+        <input
+          type="text"
+          id="search-input"
+          placeholder="Search by make, model, VIN, stock number…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+
+      <div class="filter-tabs">
+        <button class="filter-tab active" data-filter="all">All</button>
+        <button class="filter-tab" data-filter="unset">In Stock</button>
+        <button class="filter-tab" data-filter="staged">Staged</button>
+        <button class="filter-tab" data-filter="active">Active</button>
+        <button class="filter-tab" data-filter="out_of_stock">Sold</button>
+      </div>
+
+      <div id="toolbar-right">
+        <span id="result-count" style="font-size:12px;color:var(--text-muted);"></span>
+      </div>
+    </div>
+
+    <!-- ── Loading / error / empty states ───────────────────────── -->
+    <div id="loading-state">
+      <div class="spinner"></div>
+      <p>Fetching inventory from AutoHive feed…</p>
+    </div>
+
+    <div id="empty-state" style="display:none">
+      <div class="empty-icon">🚗</div>
+      <p>No vehicles found. Click <strong>Refresh Feed</strong> to pull the latest inventory from your AutoHive data source.</p>
+      <button class="btn btn-primary" onclick="document.getElementById('btn-refresh').click()" style="margin-top:8px;">Refresh Feed Now</button>
+    </div>
+
+    <div id="error-state" style="display:none">
+      <div class="empty-icon">⚠</div>
+      <p id="error-message">An error occurred while fetching the inventory feed.</p>
+      <button class="btn btn-secondary" onclick="document.getElementById('btn-refresh').click()" style="margin-top:8px;">Retry</button>
+    </div>
+
+    <!-- ── Inventory grid ────────────────────────────────────────── -->
+    <div id="inventory-grid" style="display:none"></div>
+
+  </div><!-- /#app -->
+
+  <!-- ── Description preview modal ───────────────────────────────── -->
+  <div id="modal-overlay">
+    <div id="modal-box">
+      <div id="modal-title">Generated Listing Description</div>
+      <pre id="modal-body"></pre>
+      <div id="modal-actions">
+        <button class="btn btn-secondary btn-sm" id="modal-regen">↺ Regenerate</button>
+        <button class="btn btn-primary btn-sm"   id="modal-copy">📋 Copy to Clipboard</button>
+        <button class="btn btn-ghost btn-sm"     id="modal-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Toast container ──────────────────────────────────────────── -->
+  <div id="toast-container"></div>
+
+  <!-- Scripts -->
+  <script src="aiCopywriter.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>
