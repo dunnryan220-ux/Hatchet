@@ -1,19 +1,8 @@
-/**
- * Hatchett Torque — Dashboard Controller (dashboard.js)
- *
- * Runs in the full-page options UI (dashboard.html).
- * Communicates with background.js via chrome.runtime.sendMessage.
- *
- * State shape:
- *   _inventory  — array of parsed vehicle objects from storage
- *   _statuses   — { [vin]: 'staged'|'active'|'out_of_stock'|'unset' }
- *   _filter     — active status filter tab
- *   _query      — active search string
- *   _modalVin   — VIN of vehicle whose description is currently shown
- *   _queueTotal — total vehicles in the current bulk queue (for progress)
- */
-
 'use strict';
+
+// ─── Config ───────────────────────────────────────────────────────────────────
+
+const DEFAULT_FEED_URL = 'https://raw.githubusercontent.com/dunnryan220-ux/autohive-inventory/main/AutoHive_Inventory_Full.csv';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -28,74 +17,69 @@ let _queueTotal = 0;
 
 const $ = id => document.getElementById(id);
 
-const grid          = $('inventory-grid');
-const loadingState  = $('loading-state');
-const emptyState    = $('empty-state');
-const errorState    = $('error-state');
-const errorMessage  = $('error-message');
-const queueBanner   = $('queue-banner');
-const queueLabel    = $('queue-label');
-const queueFill     = $('queue-progress-fill');
-const resultCount   = $('result-count');
-const cacheTs       = $('cache-timestamp');
-const modalOverlay  = $('modal-overlay');
-const modalBody     = $('modal-body');
-const modalTitle    = $('modal-title');
-
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindStaticEvents();
   await restoreSavedFeedUrl();
-  await loadData(false);
+
+  // Try loading from cache first, then fetch fresh if empty
+  const cached = await loadFromLocalStorage();
+  if (cached && cached.length) {
+    _inventory = cached;
+    await loadStatuses();
+    updateStats();
+    renderGrid();
+    showState('grid');
+    updateCacheTimestamp(await getTimestamp());
+  } else {
+    await fetchAndLoad(false);
+  }
+
   startStorageWatcher();
 });
+
+// ─── Feed URL persistence ─────────────────────────────────────────────────────
 
 async function restoreSavedFeedUrl() {
   const result = await chrome.storage.local.get('ht_feed_url');
   if (result.ht_feed_url) {
     $('feed-url-input').value = result.ht_feed_url;
-    $('feed-url-status').textContent = '✓ custom URL active';
+    $('feed-url-status').textContent = '✓ custom URL';
+  } else {
+    $('feed-url-input').value = DEFAULT_FEED_URL;
   }
+}
+
+function getActiveFeedUrl() {
+  const val = $('feed-url-input').value.trim();
+  return val || DEFAULT_FEED_URL;
 }
 
 // ─── Static event bindings ────────────────────────────────────────────────────
 
 function bindStaticEvents() {
-  // Refresh feed from URL
-  $('btn-refresh').addEventListener('click', () => loadData(true));
+  $('btn-refresh').addEventListener('click', () => fetchAndLoad(true));
 
-  // Save custom feed URL and immediately fetch
   $('btn-save-url').addEventListener('click', async () => {
     const url = $('feed-url-input').value.trim();
-    if (!url) {
-      await chrome.storage.local.remove('ht_feed_url');
-      $('feed-url-status').textContent = 'Cleared — using default URL';
-      return;
-    }
-    await chrome.storage.local.set({ ht_feed_url: url });
+    await chrome.storage.local.set({ ht_feed_url: url || DEFAULT_FEED_URL });
     $('feed-url-status').textContent = 'Saved — fetching…';
-    await loadData(true);
-    $('feed-url-status').textContent = '✓ custom URL active';
+    await fetchAndLoad(true);
+    $('feed-url-status').textContent = '✓ saved';
   });
 
-  // Local CSV file upload
   $('btn-upload-csv').addEventListener('click', () => $('csv-file-input').click());
   $('csv-file-input').addEventListener('change', handleCSVUpload);
 
-  // Post All
   $('btn-post-all').addEventListener('click', postAllInventory);
-
-  // Cancel queue
   $('btn-cancel-queue').addEventListener('click', cancelQueue);
 
-  // Search
   $('search-input').addEventListener('input', () => {
     _query = $('search-input').value.trim().toLowerCase();
     renderGrid();
   });
 
-  // Filter tabs
   document.querySelectorAll('.filter-tab').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'));
@@ -105,91 +89,264 @@ function bindStaticEvents() {
     });
   });
 
-  // Modal controls
   $('modal-close').addEventListener('click', closeModal);
   $('modal-copy').addEventListener('click', copyModalDescription);
   $('modal-regen').addEventListener('click', regenModalDescription);
-  modalOverlay.addEventListener('click', e => { if (e.target === modalOverlay) closeModal(); });
+  $('modal-overlay').addEventListener('click', e => { if (e.target === $('modal-overlay')) closeModal(); });
 
-  // Keyboard shortcuts
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeModal();
-    if ((e.metaKey || e.ctrlKey) && e.key === 'r') { e.preventDefault(); loadData(true); }
   });
 }
 
-// ─── Data loading ──────────────────────────────────────────────────────────────
+// ─── Direct CSV fetch (no service worker) ─────────────────────────────────────
+
+async function fetchAndLoad(force = false) {
+  showState('loading');
+  setFeedStatus('Fetching…');
+
+  try {
+    const url      = getActiveFeedUrl();
+    const csvText  = await fetchCSV(url);
+    _inventory     = parseCSV(csvText);
+
+    if (!_inventory.length) throw new Error('CSV parsed but no vehicles found — check feed URL or file format.');
+
+    // Persist to storage so service worker and content scripts can read it
+    await chrome.storage.local.set({
+      ht_inventory: _inventory,
+      ht_inventory_timestamp: Date.now(),
+    });
+
+    await loadStatuses();
+    updateStats();
+    renderGrid();
+    showState('grid');
+    updateCacheTimestamp(Date.now());
+    setFeedStatus(`✓ ${_inventory.length} vehicles`);
+    if (force) toast(`✅ ${_inventory.length} vehicles loaded`, 'success');
+
+  } catch (err) {
+    showState('error');
+    $('error-message').textContent = err.message;
+    setFeedStatus('❌ fetch failed');
+    toast('❌ ' + err.message, 'error');
+    console.error('[Hatchett Torque] fetch error:', err);
+  }
+}
+
+async function fetchCSV(url) {
+  const resp = await fetch(url, { cache: 'no-store' });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching feed — check URL: ${url}`);
+  const text = await resp.text();
+  if (!text.trim()) throw new Error('Feed returned empty response.');
+  return text;
+}
+
+// ─── Local CSV file upload ─────────────────────────────────────────────────────
 
 async function handleCSVUpload(e) {
   const file = e.target.files?.[0];
   if (!file) return;
-  $('csv-file-input').value = ''; // reset so same file can be re-uploaded
+  $('csv-file-input').value = '';
 
   showState('loading');
   try {
-    const csvText = await file.text();
-    const result  = await sendMsg({ type: 'LOAD_CSV_TEXT', csvText });
-    if (!result.ok) throw new Error(result.error);
+    const csvText  = await file.text();
+    _inventory     = parseCSV(csvText);
+    if (!_inventory.length) throw new Error('No vehicle rows found in this CSV file.');
 
-    _inventory = result.inventory;
-    const statusResult = await sendMsg({ type: 'GET_STATUSES' });
-    _statuses  = statusResult.statuses || {};
+    await chrome.storage.local.set({
+      ht_inventory: _inventory,
+      ht_inventory_timestamp: Date.now(),
+    });
 
-    updateCacheTimestamp(Date.now());
+    await loadStatuses();
     updateStats();
     renderGrid();
-    showState(_inventory.length ? 'grid' : 'empty');
-    toast(`✅ Loaded ${_inventory.length} vehicles from ${file.name}`, 'success');
+    showState('grid');
+    updateCacheTimestamp(Date.now());
+    toast(`✅ ${_inventory.length} vehicles loaded from ${file.name}`, 'success');
   } catch (err) {
     showState('error');
-    errorMessage.textContent = 'CSV upload failed: ' + err.message;
+    $('error-message').textContent = 'Upload failed: ' + err.message;
     toast('❌ ' + err.message, 'error');
   }
 }
 
-async function loadData(force = false) {
-  showState('loading');
+// ─── Storage helpers ──────────────────────────────────────────────────────────
 
-  try {
-    const urlResult = await chrome.storage.local.get('ht_feed_url');
-    const feedUrl   = urlResult.ht_feed_url || null;
+async function loadFromLocalStorage() {
+  const r = await chrome.storage.local.get('ht_inventory');
+  return r.ht_inventory || [];
+}
 
-    // Always pull statuses alongside inventory
-    const [invResult, statusResult, tsResult] = await Promise.all([
-      sendMsg({ type: force ? 'FETCH_INVENTORY' : 'GET_INVENTORY', force, feedUrl }),
-      sendMsg({ type: 'GET_STATUSES' }),
-      new Promise(resolve => chrome.storage.local.get('ht_inventory_timestamp', r => resolve(r))),
-    ]);
+async function loadStatuses() {
+  const r = await chrome.storage.local.get('ht_statuses');
+  _statuses = r.ht_statuses || {};
+}
 
-    if (!invResult.ok) throw new Error(invResult.error || 'Unknown error');
+async function getTimestamp() {
+  const r = await chrome.storage.local.get('ht_inventory_timestamp');
+  return r.ht_inventory_timestamp || null;
+}
 
-    _inventory = invResult.inventory || [];
-    _statuses  = statusResult.statuses || {};
+// ─── CSV parser (mirrors background.js — must stay in sync) ───────────────────
 
-    updateCacheTimestamp(tsResult.ht_inventory_timestamp);
-    updateStats();
-    renderGrid();
-    showState(_inventory.length ? 'grid' : 'empty');
-    if (force) toast('✅ Feed refreshed — ' + _inventory.length + ' vehicles loaded', 'success');
+const FEED_COLS = {
+  vin:               ['vin'],
+  stocknumber:       ['stock #', 'stock#', 'stock', 'stocknumber', 'stock_number'],
+  newused:           ['new/used', 'newused', 'condition'],
+  year:              ['year', 'modelyear'],
+  make:              ['make'],
+  model:             ['model'],
+  series:            ['series', 'trim', 'trimlevel'],
+  body:              ['body', 'bodystyle', 'body style'],
+  transmission:      ['transmission', 'trans'],
+  odometer:          ['odometer', 'mileage', 'miles'],
+  enginecylinderct:  ['engine cylinder ct', 'enginecylinderct', 'cylinders'],
+  enginedisplacement:['engine displacement', 'enginedisplacement'],
+  drivetraindesc:    ['drivetrain desc', 'drivetraindesc', 'drivetrain'],
+  colour:            ['colour', 'color', 'exteriorcolor', 'exterior color'],
+  interiorcolor:     ['interior color', 'interiorcolor'],
+  price:             ['price', 'listprice', 'sellingprice'],
+  msrp:              ['msrp'],
+  description:       ['description', 'comments'],
+  features:          ['features', 'options', 'equipment'],
+  citympg:           ['city mpg', 'citympg'],
+  highwaympg:        ['highway mpg', 'highwaympg', 'hwy mpg'],
+  photos:            ['photos', 'images', 'imageurls', 'photourl'],
+  dealername:        ['dealer name', 'dealername'],
+  engine:            ['engine'],
+  fuel:              ['fuel', 'fueltype', 'fuel type'],
+  age:               ['age', 'days on lot'],
+  dealercity:        ['dealer city', 'dealercity'],
+  dealerregion:      ['dealer region', 'dealerregion', 'state'],
+  certified:         ['certified'],
+};
 
-  } catch (err) {
-    showState('error');
-    errorMessage.textContent = 'Failed to load inventory: ' + err.message;
-    toast('❌ ' + err.message, 'error');
+function parseCSV(raw) {
+  const text = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
+  const lines = splitCSVIntoRows(text);
+  if (lines.length < 2) return [];
+
+  const headers = splitCSVLine(lines[0]).map(h => h.trim().toLowerCase());
+
+  function colIdx(key) {
+    const aliases = FEED_COLS[key] || [key];
+    for (const a of aliases) {
+      const i = headers.indexOf(a.toLowerCase());
+      if (i !== -1) return i;
+    }
+    return -1;
   }
+
+  // Pre-compute column indices once
+  const idx = {};
+  Object.keys(FEED_COLS).forEach(k => { idx[k] = colIdx(k); });
+
+  const get = (cells, key) => idx[key] !== -1 ? (cells[idx[key]] || '').trim() : '';
+
+  const inventory = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const cells = splitCSVLine(line);
+    const vin   = get(cells, 'vin');
+    if (!vin) continue;
+
+    const priceRaw  = get(cells, 'price') || get(cells, 'msrp');
+    const engineRaw = get(cells, 'engine') ||
+      [get(cells, 'enginedisplacement'), get(cells, 'enginecylinderct') ? get(cells, 'enginecylinderct') + '-cyl' : '']
+        .filter(Boolean).join(' ');
+
+    inventory.push({
+      vin,
+      stockNumber:  get(cells, 'stocknumber'),
+      year:         get(cells, 'year'),
+      make:         get(cells, 'make'),
+      model:        get(cells, 'model'),
+      trim:         get(cells, 'series'),
+      condition:    get(cells, 'newused'),
+      price:        priceRaw,
+      msrp:         get(cells, 'msrp'),
+      mileage:      get(cells, 'odometer'),
+      exteriorColor:get(cells, 'colour'),
+      interiorColor:get(cells, 'interiorcolor'),
+      engine:       engineRaw,
+      transmission: get(cells, 'transmission'),
+      drivetrain:   get(cells, 'drivetraindesc'),
+      fuelType:     get(cells, 'fuel'),
+      bodyStyle:    get(cells, 'body'),
+      cityMpg:      get(cells, 'citympg'),
+      hwyMpg:       get(cells, 'highwaympg'),
+      dealerName:   get(cells, 'dealername'),
+      dealerCity:   get(cells, 'dealercity'),
+      dealerRegion: get(cells, 'dealerregion'),
+      daysOnLot:    get(cells, 'age'),
+      certified:    get(cells, 'certified'),
+      images:       pipeSplit(get(cells, 'photos')),
+      features:     pipeSplit(get(cells, 'features')),
+      description:  get(cells, 'description'),
+    });
+  }
+  return inventory;
+}
+
+// Split CSV text into logical rows, handling quoted newlines
+function splitCSVIntoRows(text) {
+  const rows  = [];
+  let cur     = '';
+  let inQ     = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      inQ = !inQ;
+      cur += ch;
+    } else if (!inQ && (ch === '\n' || (ch === '\r' && text[i+1] === '\n'))) {
+      if (ch === '\r') i++;
+      rows.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) rows.push(cur);
+  return rows;
+}
+
+function splitCSVLine(line) {
+  const fields = [];
+  let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i+1] === '"') { cur += '"'; i++; }
+        else inQ = false;
+      } else cur += ch;
+    } else {
+      if (ch === '"') inQ = true;
+      else if (ch === ',') { fields.push(cur); cur = ''; }
+      else cur += ch;
+    }
+  }
+  fields.push(cur);
+  return fields;
+}
+
+function pipeSplit(val) {
+  return val ? val.split('|').map(s => s.trim()).filter(Boolean) : [];
 }
 
 // ─── Stats bar ────────────────────────────────────────────────────────────────
 
 function updateStats() {
-  const counts = { active: 0, staged: 0, out_of_stock: 0, unset: 0 };
-
+  const counts = { active: 0, staged: 0, out_of_stock: 0 };
   _inventory.forEach(v => {
-    const s = _statuses[v.vin] || 'unset';
-    if (counts[s] !== undefined) counts[s]++;
-    else counts.unset++;
+    const s = _statuses[v.vin];
+    if (s && counts[s] !== undefined) counts[s]++;
   });
-
   $('stat-total').textContent  = _inventory.length;
   $('stat-active').textContent = counts.active;
   $('stat-staged').textContent = counts.staged;
@@ -199,304 +356,229 @@ function updateStats() {
 // ─── Grid rendering ────────────────────────────────────────────────────────────
 
 function renderGrid() {
+  const grid     = $('inventory-grid');
   const filtered = getFiltered();
-  resultCount.textContent = filtered.length !== _inventory.length
-    ? `${filtered.length} of ${_inventory.length} vehicles`
+
+  $('result-count').textContent = filtered.length !== _inventory.length
+    ? `${filtered.length} of ${_inventory.length}`
     : `${_inventory.length} vehicles`;
 
   grid.innerHTML = '';
 
   if (!filtered.length) {
-    grid.innerHTML = `
-      <div style="grid-column:1/-1;display:flex;flex-direction:column;align-items:center;gap:12px;padding:60px 0;color:var(--text-muted);">
-        <div style="font-size:36px;opacity:0.4">🔍</div>
-        <p style="font-size:14px">No vehicles match your current search or filter.</p>
-      </div>`;
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:60px 0;color:var(--text-muted);">
+      <div style="font-size:36px;opacity:.4;margin-bottom:12px">🔍</div>
+      No vehicles match your search or filter.
+    </div>`;
     return;
   }
 
-  filtered.forEach((vehicle, i) => {
-    const card = buildVehicleCard(vehicle, i);
-    grid.appendChild(card);
-  });
+  filtered.forEach((v, i) => grid.appendChild(buildVehicleCard(v, i)));
 }
 
 function getFiltered() {
   return _inventory.filter(v => {
-    const status = _statuses[v.vin] || 'unset';
-    if (_filter !== 'all' && status !== _filter) return false;
+    const s = _statuses[v.vin] || 'unset';
+    if (_filter !== 'all' && s !== _filter) return false;
     if (!_query) return true;
-    const haystack = [v.year, v.make, v.model, v.trim, v.vin, v.stockNumber,
-                      v.exteriorColor, v.price].join(' ').toLowerCase();
-    return haystack.includes(_query);
+    return [v.year, v.make, v.model, v.trim, v.vin, v.stockNumber, v.exteriorColor, v.price]
+      .join(' ').toLowerCase().includes(_query);
   });
 }
 
-// ─── Vehicle card builder ─────────────────────────────────────────────────────
+// ─── Vehicle card ─────────────────────────────────────────────────────────────
 
-function buildVehicleCard(vehicle, index) {
-  const status  = _statuses[vehicle.vin] || 'unset';
-  const thumb   = vehicle.images?.[0] || null;
-  const price   = HatchettCopywriter.formatPrice(vehicle.price);
-  const mileage = HatchettCopywriter.formatMileage(vehicle.mileage);
-  const label   = statusLabels[status] || 'In Stock';
+const STATUS_LABELS = { active: 'Active', staged: 'Staged', out_of_stock: 'Sold', unset: 'In Stock' };
+const STATUS_CYCLE  = ['unset', 'staged', 'active', 'out_of_stock'];
+
+function buildVehicleCard(v, index) {
+  const status = _statuses[v.vin] || 'unset';
+  const price  = HatchettCopywriter.formatPrice(v.price);
+  const miles  = HatchettCopywriter.formatMileage(v.mileage);
+  const thumb  = v.images?.[0] || '';
 
   const card = document.createElement('div');
   card.className = 'vehicle-card';
-  card.dataset.vin = vehicle.vin;
-  card.style.animationDelay = `${Math.min(index * 25, 300)}ms`;
+  card.style.animationDelay = `${Math.min(index * 20, 300)}ms`;
+  card.dataset.vin = v.vin;
 
   card.innerHTML = `
-    ${thumb
-      ? `<img class="vehicle-card-thumb" src="${esc(thumb)}" alt="${esc(vehicle.year)} ${esc(vehicle.make)} ${esc(vehicle.model)}" loading="lazy"
-             onerror="this.style.display='none';this.nextSibling.style.display='flex'">`
-      : ''}
+    ${thumb ? `<img class="vehicle-card-thumb" src="${esc(thumb)}" alt="" loading="lazy"
+        onerror="this.style.display='none';this.nextSibling.style.display='flex'">` : ''}
     <div class="vehicle-card-thumb-placeholder" style="${thumb ? 'display:none' : ''}">🚗</div>
 
     <div class="vehicle-card-body">
-      <div class="vehicle-card-title">${esc(vehicle.year)} ${esc(vehicle.make)} ${esc(vehicle.model)}${vehicle.trim ? ' <span style="font-weight:500;color:var(--text-secondary)">' + esc(vehicle.trim) + '</span>' : ''}</div>
-      <div class="vehicle-card-sub">
-        ${vehicle.stockNumber ? 'Stock #' + esc(vehicle.stockNumber) + ' · ' : ''}${esc(vehicle.vin?.slice(-8) || '—')}
+      <div class="vehicle-card-title">${esc(v.year)} ${esc(v.make)} ${esc(v.model)}
+        ${v.trim ? `<span style="font-weight:500;color:var(--text-secondary);font-size:13px"> ${esc(v.trim)}</span>` : ''}
       </div>
+      <div class="vehicle-card-sub">${v.stockNumber ? 'Stock #' + esc(v.stockNumber) + ' · ' : ''}${esc(v.vin?.slice(-8) || '—')}</div>
       <div class="vehicle-card-price">${esc(price)}</div>
-      <div class="vehicle-card-mileage">${esc(mileage)}</div>
+      <div class="vehicle-card-mileage">${esc(miles)}${v.drivetrain ? ' · ' + esc(v.drivetrain) : ''}</div>
     </div>
 
     <div class="vehicle-card-footer">
-      <span class="badge badge-${status}">${label}</span>
-      <div style="display:flex;gap:6px;align-items:center">
-        <button class="btn btn-ghost btn-sm" data-action="preview" data-vin="${esc(vehicle.vin)}" title="Preview generated description">📋</button>
-        <button class="btn btn-primary btn-sm" data-action="post" data-vin="${esc(vehicle.vin)}">
-          Post →
-        </button>
+      <span class="badge badge-${status}" data-action="cycle-status" data-vin="${esc(v.vin)}" title="Click to cycle status" style="cursor:pointer">
+        ${STATUS_LABELS[status] || 'In Stock'}
+      </span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" data-action="preview" data-vin="${esc(v.vin)}" title="Preview AI description">📋</button>
+        <button class="btn btn-primary btn-sm" data-action="post" data-vin="${esc(v.vin)}">Post →</button>
       </div>
-    </div>
-  `;
+    </div>`;
 
-  card.addEventListener('click', e => {
-    const btn = e.target.closest('[data-action]');
-    if (!btn) return;
-    const vin = btn.dataset.vin;
-    const v   = _inventory.find(x => x.vin === vin);
-    if (!v) return;
+  card.addEventListener('click', async e => {
+    const el  = e.target.closest('[data-action]');
+    if (!el) return;
+    const vin = el.dataset.vin;
+    const vehicle = _inventory.find(x => x.vin === vin);
+    if (!vehicle) return;
 
-    if (btn.dataset.action === 'post')    postSingleVehicle(v);
-    if (btn.dataset.action === 'preview') openDescriptionModal(v);
-  });
-
-  // Status change on right-click context menu override (middle ground: status cycle on badge click)
-  const badge = card.querySelector('.badge');
-  badge.style.cursor = 'pointer';
-  badge.title = 'Click to cycle status';
-  badge.addEventListener('click', e => {
-    e.stopPropagation();
-    cycleStatus(vehicle.vin);
+    if (el.dataset.action === 'post')         postSingleVehicle(vehicle);
+    if (el.dataset.action === 'preview')      openDescriptionModal(vehicle);
+    if (el.dataset.action === 'cycle-status') cycleStatus(vin);
   });
 
   return card;
 }
 
-const statusLabels = {
-  unset:       'In Stock',
-  staged:      'Staged',
-  active:      'Active',
-  out_of_stock:'Sold',
-};
-
-const statusCycle = ['unset', 'staged', 'active', 'out_of_stock'];
-
 async function cycleStatus(vin) {
-  const current = _statuses[vin] || 'unset';
-  const nextIdx = (statusCycle.indexOf(current) + 1) % statusCycle.length;
-  const next    = statusCycle[nextIdx];
-
-  await sendMsg({ type: 'SET_STATUS', vin, status: next });
+  const cur  = _statuses[vin] || 'unset';
+  const next = STATUS_CYCLE[(STATUS_CYCLE.indexOf(cur) + 1) % STATUS_CYCLE.length];
   _statuses[vin] = next;
+  const all = await chrome.storage.local.get('ht_statuses');
+  const s   = all.ht_statuses || {};
+  s[vin]    = next;
+  await chrome.storage.local.set({ ht_statuses: s });
   updateStats();
   renderGrid();
 }
 
-// ─── Single vehicle post ───────────────────────────────────────────────────────
+// ─── Posting ──────────────────────────────────────────────────────────────────
 
 async function postSingleVehicle(vehicle) {
-  const result = await sendMsg({ type: 'POST_SINGLE', vehicle });
-  if (result.ok) {
+  try {
+    // Store the vehicle as pending so the content script picks it up
+    await chrome.storage.local.set({ ht_pending_vehicle: vehicle });
+    await chrome.tabs.create({ url: 'https://www.facebook.com/marketplace/create/item', active: true });
     toast(`🚀 Opening Facebook for: ${vehicle.year} ${vehicle.make} ${vehicle.model}`, 'info');
-  } else {
-    toast('❌ Failed to open tab: ' + result.error, 'error');
+    // Mark staged
+    _statuses[vehicle.vin] = 'staged';
+    const all = await chrome.storage.local.get('ht_statuses');
+    const s   = all.ht_statuses || {};
+    s[vehicle.vin] = 'staged';
+    await chrome.storage.local.set({ ht_statuses: s });
+    updateStats();
+    renderGrid();
+  } catch (err) {
+    toast('❌ Could not open tab: ' + err.message, 'error');
   }
 }
 
-// ─── Bulk post queue ──────────────────────────────────────────────────────────
-
 async function postAllInventory() {
   const eligible = _inventory.filter(v => (_statuses[v.vin] || 'unset') !== 'active');
+  if (!eligible.length) { toast('All inventory is already marked Active.', 'info'); return; }
 
-  if (!eligible.length) {
-    toast('All inventory is already marked Active.', 'info');
-    return;
-  }
-
-  const confirmed = confirm(
-    `Queue ${eligible.length} vehicle${eligible.length !== 1 ? 's' : ''} for Facebook Marketplace posting?\n\n` +
-    `Each vehicle will open in a Facebook tab sequentially. You will review and publish each listing manually — Hatchett Torque will fill the form for you.\n\n` +
-    `Already Active listings will be skipped.`
-  );
-  if (!confirmed) return;
+  if (!confirm(`Queue ${eligible.length} vehicle(s) for sequential posting?\n\nHatchett Torque will open each one in Facebook, fill the form, and wait for you to publish before moving to the next.`)) return;
 
   _queueTotal = eligible.length;
+  $('queue-banner').classList.add('visible');
   updateQueueBanner(0, _queueTotal);
-  queueBanner.classList.add('visible');
 
   const vins = eligible.map(v => v.vin);
-  const result = await sendMsg({ type: 'QUEUE_POST_ALL', vins });
+  await chrome.storage.local.set({ ht_queue: vins });
 
-  if (!result.ok) {
-    toast('❌ Queue start failed: ' + result.error, 'error');
-    queueBanner.classList.remove('visible');
-  } else {
-    toast(`🚀 Queue started — ${eligible.length} vehicles queued`, 'success');
-  }
+  // Kick off first vehicle
+  const firstVin = vins[0];
+  const vehicle  = _inventory.find(v => v.vin === firstVin);
+  if (vehicle) await postSingleVehicle(vehicle);
 }
 
 async function cancelQueue() {
   await chrome.storage.local.remove('ht_queue');
-  queueBanner.classList.remove('visible');
+  $('queue-banner').classList.remove('visible');
   toast('Queue cancelled.', 'info');
 }
 
-function updateQueueBanner(completed, total) {
-  const pct = total > 0 ? (completed / total) * 100 : 0;
-  queueFill.style.width = pct + '%';
-  queueLabel.textContent = total > 0
-    ? `Posting ${completed + 1} of ${total} vehicles…`
-    : 'Queue complete';
+function updateQueueBanner(done, total) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  $('queue-progress-fill').style.width = pct + '%';
+  $('queue-label').textContent = total > 0 ? `Posting ${done + 1} of ${total}…` : 'Queue complete';
 }
 
 // ─── Description modal ─────────────────────────────────────────────────────────
 
 function openDescriptionModal(vehicle) {
-  _modalVin  = vehicle.vin;
+  _modalVin = vehicle.vin;
   const desc = HatchettCopywriter.generateDescription(vehicle);
-  modalTitle.textContent = `${vehicle.year} ${vehicle.make} ${vehicle.model} — Generated Description`;
-  modalBody.textContent  = desc;
-  modalOverlay.classList.add('visible');
+  $('modal-title').textContent = `${vehicle.year} ${vehicle.make} ${vehicle.model} — AI Description`;
+  $('modal-body').textContent  = desc;
+  $('modal-overlay').classList.add('visible');
 }
 
-function closeModal() {
-  modalOverlay.classList.remove('visible');
-  _modalVin = null;
-}
+function closeModal() { $('modal-overlay').classList.remove('visible'); _modalVin = null; }
 
 function regenModalDescription() {
-  const vehicle = _inventory.find(v => v.vin === _modalVin);
-  if (!vehicle) return;
-  modalBody.textContent = HatchettCopywriter.generateDescription(vehicle);
+  const v = _inventory.find(x => x.vin === _modalVin);
+  if (v) $('modal-body').textContent = HatchettCopywriter.generateDescription(v);
 }
 
 function copyModalDescription() {
-  const text = modalBody.textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    toast('📋 Description copied to clipboard!', 'success');
-  }).catch(() => {
-    toast('⚠ Clipboard access denied.', 'error');
-  });
+  navigator.clipboard.writeText($('modal-body').textContent)
+    .then(() => toast('📋 Copied!', 'success'))
+    .catch(() => toast('⚠ Clipboard denied', 'error'));
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
 function showState(state) {
-  loadingState.style.display = state === 'loading' ? 'flex'  : 'none';
-  emptyState.style.display   = state === 'empty'   ? 'flex'  : 'none';
-  errorState.style.display   = state === 'error'   ? 'flex'  : 'none';
-  grid.style.display         = state === 'grid'    ? 'grid'  : 'none';
+  $('loading-state').style.display = state === 'loading' ? 'flex'  : 'none';
+  $('empty-state').style.display   = state === 'empty'   ? 'flex'  : 'none';
+  $('error-state').style.display   = state === 'error'   ? 'flex'  : 'none';
+  $('inventory-grid').style.display= state === 'grid'    ? 'grid'  : 'none';
 }
 
 function updateCacheTimestamp(ts) {
-  if (!ts) { cacheTs.textContent = ''; return; }
-  const d   = new Date(ts);
+  if (!ts) { $('cache-timestamp').textContent = ''; return; }
   const ago = Math.floor((Date.now() - ts) / 60000);
-  cacheTs.textContent = ago < 1
-    ? 'Feed: just now'
-    : ago < 60
-    ? `Feed: ${ago}m ago`
-    : `Feed: ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  $('cache-timestamp').textContent = ago < 1 ? 'Feed: just now' : `Feed: ${ago}m ago`;
 }
 
-// ─── Toast notifications ──────────────────────────────────────────────────────
+function setFeedStatus(msg) {
+  $('feed-url-status').textContent = msg;
+}
 
 function toast(message, type = 'info') {
-  const container = $('toast-container');
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
   el.textContent = message;
-  container.appendChild(el);
-
-  setTimeout(() => {
-    el.classList.add('toast-out');
-    setTimeout(() => el.remove(), 300);
-  }, 3500);
+  $('toast-container').appendChild(el);
+  setTimeout(() => { el.classList.add('toast-out'); setTimeout(() => el.remove(), 300); }, 4000);
 }
 
-// ─── Storage change watcher (live badge updates) ───────────────────────────────
+// ─── Live storage watcher ─────────────────────────────────────────────────────
 
 function startStorageWatcher() {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-
     if (changes.ht_statuses) {
       _statuses = changes.ht_statuses.newValue || {};
       updateStats();
       renderGrid();
     }
-
     if (changes.ht_queue) {
-      const queue = changes.ht_queue.newValue;
-      if (queue?.length) {
-        const done = _queueTotal - queue.length;
-        updateQueueBanner(done, _queueTotal);
-      } else if (_queueTotal > 0) {
-        // Queue finished
-        updateQueueBanner(_queueTotal, _queueTotal);
-        queueLabel.textContent = '✅ Queue complete';
-        setTimeout(() => queueBanner.classList.remove('visible'), 3000);
-        toast('✅ All vehicles have been queued for posting!', 'success');
+      const q = changes.ht_queue.newValue;
+      if (q?.length) updateQueueBanner(_queueTotal - q.length, _queueTotal);
+      else if (_queueTotal > 0) {
+        $('queue-label').textContent = '✅ Queue complete';
+        setTimeout(() => $('queue-banner').classList.remove('visible'), 3000);
         _queueTotal = 0;
       }
     }
-
-    if (changes.ht_inventory) {
-      _inventory = changes.ht_inventory.newValue || [];
-      updateStats();
-      renderGrid();
-    }
   });
 }
 
-// ─── Message helper ───────────────────────────────────────────────────────────
+// ─── Safety ───────────────────────────────────────────────────────────────────
 
-function sendMsg(msg) {
-  return new Promise((resolve, reject) => {
-    try {
-      chrome.runtime.sendMessage(msg, response => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-        } else {
-          resolve(response || {});
-        }
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-// ─── String safety ────────────────────────────────────────────────────────────
-
-function esc(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
