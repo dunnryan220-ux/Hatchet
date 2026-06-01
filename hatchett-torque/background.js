@@ -31,10 +31,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg.type) {
 
     case 'FETCH_INVENTORY':
-      fetchAndCacheInventory(msg.force)
+      fetchAndCacheInventory(msg.force, msg.feedUrl)
         .then(inventory => sendResponse({ ok: true, inventory }))
         .catch(err     => sendResponse({ ok: false, error: err.message }));
       return true; // keep channel open for async
+
+    case 'LOAD_CSV_TEXT':
+      // { type, csvText } — manual upload path, bypasses network entirely
+      try {
+        const inventory = parseCSV(msg.csvText);
+        if (!inventory.length) throw new Error('No valid vehicle rows found in CSV.');
+        chrome.storage.local.set({ [STORAGE_KEY]: inventory, [TS_KEY]: Date.now() });
+        sendResponse({ ok: true, inventory });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return true;
 
     case 'GET_INVENTORY':
       getInventory()
@@ -89,13 +101,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // ─── Feed fetching & CSV parsing ─────────────────────────────────────────────
 
-async function fetchAndCacheInventory(force = false) {
+async function fetchAndCacheInventory(force = false, overrideUrl = null) {
   if (!force) {
     const cached = await loadFromCache();
     if (cached) return cached;
   }
 
-  const response = await fetch(FEED_URL);
+  // Allow dashboard to supply a custom feed URL (e.g. GitHub raw, Dropbox)
+  const url = overrideUrl || FEED_URL;
+
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+      'Accept': 'text/csv,text/plain,*/*',
+      'Cache-Control': 'no-cache',
+    },
+  });
   if (!response.ok) throw new Error(`Feed fetch failed: ${response.status} ${response.statusText}`);
 
   const text = await response.text();

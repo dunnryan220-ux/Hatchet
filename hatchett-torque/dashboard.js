@@ -46,15 +46,42 @@ const modalTitle    = $('modal-title');
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindStaticEvents();
+  await restoreSavedFeedUrl();
   await loadData(false);
   startStorageWatcher();
 });
 
+async function restoreSavedFeedUrl() {
+  const result = await chrome.storage.local.get('ht_feed_url');
+  if (result.ht_feed_url) {
+    $('feed-url-input').value = result.ht_feed_url;
+    $('feed-url-status').textContent = '✓ custom URL active';
+  }
+}
+
 // ─── Static event bindings ────────────────────────────────────────────────────
 
 function bindStaticEvents() {
-  // Refresh feed
+  // Refresh feed from URL
   $('btn-refresh').addEventListener('click', () => loadData(true));
+
+  // Save custom feed URL and immediately fetch
+  $('btn-save-url').addEventListener('click', async () => {
+    const url = $('feed-url-input').value.trim();
+    if (!url) {
+      await chrome.storage.local.remove('ht_feed_url');
+      $('feed-url-status').textContent = 'Cleared — using default URL';
+      return;
+    }
+    await chrome.storage.local.set({ ht_feed_url: url });
+    $('feed-url-status').textContent = 'Saved — fetching…';
+    await loadData(true);
+    $('feed-url-status').textContent = '✓ custom URL active';
+  });
+
+  // Local CSV file upload
+  $('btn-upload-csv').addEventListener('click', () => $('csv-file-input').click());
+  $('csv-file-input').addEventListener('change', handleCSVUpload);
 
   // Post All
   $('btn-post-all').addEventListener('click', postAllInventory);
@@ -93,13 +120,43 @@ function bindStaticEvents() {
 
 // ─── Data loading ──────────────────────────────────────────────────────────────
 
+async function handleCSVUpload(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  $('csv-file-input').value = ''; // reset so same file can be re-uploaded
+
+  showState('loading');
+  try {
+    const csvText = await file.text();
+    const result  = await sendMsg({ type: 'LOAD_CSV_TEXT', csvText });
+    if (!result.ok) throw new Error(result.error);
+
+    _inventory = result.inventory;
+    const statusResult = await sendMsg({ type: 'GET_STATUSES' });
+    _statuses  = statusResult.statuses || {};
+
+    updateCacheTimestamp(Date.now());
+    updateStats();
+    renderGrid();
+    showState(_inventory.length ? 'grid' : 'empty');
+    toast(`✅ Loaded ${_inventory.length} vehicles from ${file.name}`, 'success');
+  } catch (err) {
+    showState('error');
+    errorMessage.textContent = 'CSV upload failed: ' + err.message;
+    toast('❌ ' + err.message, 'error');
+  }
+}
+
 async function loadData(force = false) {
   showState('loading');
 
   try {
+    const urlResult = await chrome.storage.local.get('ht_feed_url');
+    const feedUrl   = urlResult.ht_feed_url || null;
+
     // Always pull statuses alongside inventory
     const [invResult, statusResult, tsResult] = await Promise.all([
-      sendMsg({ type: force ? 'FETCH_INVENTORY' : 'GET_INVENTORY', force }),
+      sendMsg({ type: force ? 'FETCH_INVENTORY' : 'GET_INVENTORY', force, feedUrl }),
       sendMsg({ type: 'GET_STATUSES' }),
       new Promise(resolve => chrome.storage.local.get('ht_inventory_timestamp', r => resolve(r))),
     ]);
