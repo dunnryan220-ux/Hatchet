@@ -23,7 +23,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   bindStaticEvents();
   await restoreSavedFeedUrl();
 
-  // Try loading from cache first, then fetch fresh if empty
+  // Always load from cache first — never auto-fetch on startup
   const cached = await loadFromLocalStorage();
   if (cached && cached.length) {
     _inventory = cached;
@@ -33,7 +33,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     showState('grid');
     updateCacheTimestamp(await getTimestamp());
   } else {
-    await fetchAndLoad(false);
+    // No cache — show empty state prompting the user to refresh
+    showState('empty');
+    $('stat-total').textContent = '0';
+    $('stat-active').textContent = '0';
+    $('stat-staged').textContent = '0';
+    $('stat-oos').textContent = '0';
   }
 
   startStorageWatcher();
@@ -80,6 +85,11 @@ function bindStaticEvents() {
     renderGrid();
   });
 
+  // Always boot with "All" filter active regardless of prior state
+  document.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'));
+  document.querySelector('.filter-tab[data-filter="all"]').classList.add('active');
+  _filter = 'all';
+
   document.querySelectorAll('.filter-tab').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'));
@@ -102,17 +112,18 @@ function bindStaticEvents() {
 // ─── Direct CSV fetch (no service worker) ─────────────────────────────────────
 
 async function fetchAndLoad(force = false) {
-  showState('loading');
+  // Only show loading spinner if we have no data yet
+  if (!_inventory.length) showState('loading');
   setFeedStatus('Fetching…');
 
   try {
-    const url      = getActiveFeedUrl();
-    const csvText  = await fetchCSV(url);
-    _inventory     = parseCSV(csvText);
+    const url     = getActiveFeedUrl();
+    const csvText = await fetchCSV(url);
+    const parsed  = parseCSV(csvText);
 
-    if (!_inventory.length) throw new Error('CSV parsed but no vehicles found — check feed URL or file format.');
+    if (!parsed.length) throw new Error('CSV parsed but no vehicles found. Check the feed URL.');
 
-    // Persist to storage so service worker and content scripts can read it
+    _inventory = parsed;
     await chrome.storage.local.set({
       ht_inventory: _inventory,
       ht_inventory_timestamp: Date.now(),
@@ -124,14 +135,31 @@ async function fetchAndLoad(force = false) {
     showState('grid');
     updateCacheTimestamp(Date.now());
     setFeedStatus(`✓ ${_inventory.length} vehicles`);
-    if (force) toast(`✅ ${_inventory.length} vehicles loaded`, 'success');
+    toast(`✅ ${_inventory.length} vehicles loaded`, 'success');
 
   } catch (err) {
-    showState('error');
-    $('error-message').textContent = err.message;
-    setFeedStatus('❌ fetch failed');
-    toast('❌ ' + err.message, 'error');
     console.error('[Hatchett Torque] fetch error:', err);
+    setFeedStatus('❌ fetch failed');
+
+    if (_inventory.length) {
+      // Already have data on screen — just warn, don't wipe the grid
+      toast(`⚠️ Refresh failed: ${err.message} — showing cached data.`, 'error');
+    } else {
+      // Nothing on screen — try falling back to storage cache
+      const fallback = await loadFromLocalStorage();
+      if (fallback && fallback.length) {
+        _inventory = fallback;
+        await loadStatuses();
+        updateStats();
+        renderGrid();
+        showState('grid');
+        toast(`⚠️ Live fetch failed — loaded ${fallback.length} cached vehicles.`, 'error');
+      } else {
+        showState('error');
+        $('error-message').textContent =
+          `${err.message}\n\nTo fix: go to chrome://extensions → find Hatchett Torque → click the ↺ reload icon. Or use "Upload CSV" to load a local file.`;
+      }
+    }
   }
 }
 
