@@ -931,9 +931,9 @@ async function runFormFillSequence(vehicle, shadow) {
       await delay(randomMs(150, 350));
     }
 
-    // ── Step 10: Condition (default to "Used")
+    // ── Step 10: Condition (derived from mileage — FB options: Excellent/Very good/Good/Fair/Poor)
     setStatus(shadow, 'Setting condition…', 'filling');
-    await selectDropdownByLabel('Condition', 'Used', shadow);
+    await selectDropdownByLabel('Condition', deriveCondition(vehicle), shadow);
     await delay(randomMs(150, 300));
 
     // ── Step 11: Fuel type
@@ -1037,104 +1037,159 @@ async function fillContentEditable(value) {
 /**
  * selectDropdownByLabel
  *
- * Facebook renders many form controls as div[role="button"] wrappers rather
- * than native <select> elements. This function:
- *   1. Finds the wrapper matching the aria-label or inner text label
- *   2. Simulates a click to open the popover
- *   3. Waits for the option list to appear in the DOM
- *   4. Text-matches and clicks the target option
- *   5. Fires input/change events to commit the React state update
- *
- * Selector archaeology (update on FB layout patches):
- *   Label containers: [aria-label="${label}"]  ||  div:contains("${label}") ancestor of div[role="button"]
- *   Option items:     div[role="option"]  ||  li[role="option"]  ||  div[role="menuitem"]
+ * Facebook renders form controls as div[role="combobox"]/div[role="button"]
+ * wrappers backed by React. Bare .click() on the option is not enough —
+ * React listens for the full pointer event sequence. This version:
+ *   1. Finds the trigger via aria-label or visible label text
+ *   2. Opens it with a full pointer event sequence
+ *   3. Polls for a visible (non-zero bounding rect) option matching the value
+ *   4. Delivers the full pointer down/up/click sequence to commit the selection
  */
 async function selectDropdownByLabel(label, value, shadow) {
   if (!value) return false;
 
-  // Approach A: aria-label on the trigger element
-  let trigger = document.querySelector(
-    `[aria-label="${label}"], [aria-label*="${label}" i]`
-  );
-
-  // Approach B: Find by visible text label sibling
+  const trigger = findDropdownTrigger(label);
   if (!trigger) {
-    const allButtons = document.querySelectorAll('div[role="button"], button, div[role="combobox"]');
-    for (const btn of allButtons) {
-      if (btn.textContent.trim().toLowerCase().includes(label.toLowerCase())) {
-        trigger = btn;
-        break;
-      }
-    }
-  }
-
-  // Approach C: Label element pointing to an input
-  if (!trigger) {
-    const labels = document.querySelectorAll('label, span, div');
-    for (const el of labels) {
-      if (el.childElementCount === 0 && el.textContent.trim().toLowerCase() === label.toLowerCase()) {
-        trigger = el.closest('[role="button"], button') ||
-                  el.parentElement?.querySelector('[role="button"], button, select');
-        if (trigger) break;
-      }
-    }
-  }
-
-  if (!trigger) {
-    setStatus(shadow, `⚠ Dropdown "${label}" not found — fill manually`, null);
+    setStatus(shadow, `⚠ Dropdown "${label}" not found`, null);
     return false;
   }
 
-  trigger.click();
-  await delay(randomMs(300, 500));
+  trigger.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  await delay(400);
 
-  // Wait for option list to appear (max 3 seconds)
-  const optionList = await waitForElement(
-    'div[role="option"], li[role="option"], div[role="menuitem"], div[role="listbox"] div',
-    3000
-  );
+  // Open with full pointer sequence so React registers the interaction
+  trigger.focus();
+  await delay(100);
+  trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, composed: true }));
+  trigger.dispatchEvent(new MouseEvent('mousedown',     { bubbles: true, cancelable: true, composed: true }));
+  await delay(60);
+  trigger.dispatchEvent(new PointerEvent('pointerup',   { bubbles: true, cancelable: true, composed: true }));
+  trigger.dispatchEvent(new MouseEvent('mouseup',       { bubbles: true, cancelable: true, composed: true }));
+  trigger.dispatchEvent(new MouseEvent('click',         { bubbles: true, cancelable: true, composed: true }));
 
-  if (!optionList) {
-    setStatus(shadow, `⚠ Options for "${label}" didn't appear — fill manually`, null);
-    return false;
-  }
+  // Poll until a visible option matching value appears (max 4 s)
+  const lv = value.toLowerCase().trim();
+  const option = await waitForVisibleOption(lv, 4000);
 
-  // Find matching option by text
-  const allOptions = document.querySelectorAll(
-    'div[role="option"], li[role="option"], div[role="menuitem"]'
-  );
-  const lowerValue = value.toLowerCase();
-
-  let matched = null;
-  for (const opt of allOptions) {
-    const text = opt.textContent.trim().toLowerCase();
-    if (text === lowerValue || text.startsWith(lowerValue)) {
-      matched = opt;
-      break;
-    }
-  }
-
-  // Fuzzy fallback
-  if (!matched) {
-    for (const opt of allOptions) {
-      if (opt.textContent.trim().toLowerCase().includes(lowerValue)) {
-        matched = opt;
-        break;
-      }
-    }
-  }
-
-  if (!matched) {
-    // Close popover by pressing Escape and continue
+  if (!option) {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    setStatus(shadow, `⚠ Option "${value}" not found in "${label}" — select manually`, null);
+    setStatus(shadow, `⚠ Option "${value}" not found in "${label}"`, null);
     return false;
   }
 
-  matched.click();
-  await delay(randomMs(150, 300));
-  fireReactEvents(matched);
+  option.scrollIntoView({ block: 'nearest' });
+  await delay(150);
+
+  // Hover first so React's onMouseEnter fires
+  ['pointerover', 'pointerenter', 'mouseover', 'mouseenter'].forEach(e =>
+    option.dispatchEvent(new PointerEvent(e, { bubbles: true, cancelable: true, composed: true }))
+  );
+  await delay(80);
+
+  // Full click sequence
+  option.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, composed: true }));
+  option.dispatchEvent(new MouseEvent('mousedown',     { bubbles: true, cancelable: true, composed: true }));
+  await delay(60);
+  option.dispatchEvent(new PointerEvent('pointerup',   { bubbles: true, cancelable: true, composed: true }));
+  option.dispatchEvent(new MouseEvent('mouseup',       { bubbles: true, cancelable: true, composed: true }));
+  option.dispatchEvent(new MouseEvent('click',         { bubbles: true, cancelable: true, composed: true }));
+  await delay(500);
   return true;
+}
+
+/**
+ * findDropdownTrigger
+ * Locates the interactive element for a given form label. Tries four
+ * strategies in order of specificity.
+ */
+function findDropdownTrigger(label) {
+  const ll = label.toLowerCase();
+
+  // 1. Exact aria-label match on combobox/button/select
+  for (const sel of ['[role="combobox"]', '[role="button"]', 'button', 'select']) {
+    const el = document.querySelector(`${sel}[aria-label="${label}"]`) ||
+               document.querySelector(`${sel}[aria-label="${ll}"]`);
+    if (el) return el;
+  }
+
+  // 2. Partial aria-label starts-with match (handles "Year (required)" etc.)
+  for (const el of document.querySelectorAll('[role="combobox"],[role="button"],button,select')) {
+    const al = (el.getAttribute('aria-label') || '').toLowerCase();
+    if (al === ll || al.startsWith(ll + ' ') || al.startsWith(ll + '(')) return el;
+  }
+
+  // 3. <label> element whose text matches → follow htmlFor or adjacent sibling
+  for (const lbl of document.querySelectorAll('label')) {
+    if (lbl.textContent.trim().toLowerCase() === ll) {
+      if (lbl.htmlFor) {
+        const target = document.getElementById(lbl.htmlFor);
+        if (target) return target;
+      }
+      const btn = lbl.parentElement?.querySelector('[role="combobox"],[role="button"],select,button');
+      if (btn) return btn;
+    }
+  }
+
+  // 4. Leaf-text node in span/div → nearest interactive ancestor or sibling
+  for (const el of document.querySelectorAll('span,div')) {
+    if (el.childElementCount === 0 && el.textContent.trim().toLowerCase() === ll) {
+      const ancestor = el.closest('[role="combobox"],[role="button"],select,button');
+      if (ancestor) return ancestor;
+      const sibling = el.parentElement?.querySelector('[role="combobox"],[role="button"],select');
+      if (sibling) return sibling;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * waitForVisibleOption
+ * Polls every 120 ms until findOptionByText returns a result or timeout fires.
+ */
+async function waitForVisibleOption(lv, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = findOptionByText(lv);
+    if (found) return found;
+    await delay(120);
+  }
+  return null;
+}
+
+/**
+ * findOptionByText
+ * Returns the first VISIBLE element (non-zero bounding rect) whose text
+ * matches lv (exact, then starts-with). Checks multiple ARIA roles.
+ */
+function findOptionByText(lv) {
+  const selectors = [
+    '[role="option"]',
+    '[role="menuitem"]',
+    '[role="radio"]',
+    'li[tabindex]',
+    'li',
+  ];
+  for (const sel of selectors) {
+    const els = Array.from(document.querySelectorAll(sel));
+    // Exact match first
+    for (const el of els) {
+      const t = el.textContent.trim().toLowerCase();
+      if (t === lv) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) return el;
+      }
+    }
+    // Starts-with match (catches "Very good" when searching "very good")
+    for (const el of els) {
+      const t = el.textContent.trim().toLowerCase();
+      if (t.startsWith(lv) && t.length < lv.length + 40) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) return el;
+      }
+    }
+  }
+  return null;
 }
 
 // ─── React event helper ────────────────────────────────────────────────────────
@@ -1183,12 +1238,23 @@ function delay(ms) {
 
 function normalizeFuelType(raw) {
   const lower = (raw || '').toLowerCase();
-  if (lower.includes('gas') || lower.includes('gasoline') || lower.includes('petrol')) return 'Gasoline';
-  if (lower.includes('diesel'))   return 'Diesel';
-  if (lower.includes('electric')) return 'Electric';
-  if (lower.includes('hybrid'))   return 'Hybrid';
-  if (lower.includes('plug'))     return 'Plug-in hybrid';
-  return raw;
+  if (lower.includes('plug') || lower.includes('phev')) return 'Plug-in hybrid';
+  if (lower.includes('hybrid'))                         return 'Hybrid';
+  if (lower.includes('electric') || lower === 'ev')     return 'Electric';
+  if (lower.includes('diesel'))                         return 'Diesel';
+  if (lower.includes('flex') || lower.includes('ffv') || lower.includes('e85')) return 'Flex';
+  if (lower.includes('gas') || lower.includes('gasoline') || lower.includes('petrol') || lower.includes('unleaded')) return 'Gasoline';
+  return 'Gasoline'; // safe fallback
+}
+
+// Derive FB condition label from vehicle data (FB options: Excellent/Very good/Good/Fair/Poor)
+function deriveCondition(vehicle) {
+  if ((vehicle.condition || '').toUpperCase() === 'N') return 'Excellent';
+  const miles = parseInt(String(vehicle.mileage || '0').replace(/[^0-9]/g, ''), 10) || 0;
+  if (miles < 30000)  return 'Excellent';
+  if (miles < 70000)  return 'Very good';
+  if (miles < 120000) return 'Good';
+  return 'Fair';
 }
 
 function formatMileageShort(raw) {
