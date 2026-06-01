@@ -10,7 +10,7 @@
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const FEED_URL       = 'http://autohiveinventory.infinityfree.me/AutoHive_Inventory_Full.csv';
+const FEED_URL       = 'https://raw.githubusercontent.com/dunnryan220-ux/autohive-inventory/main/AutoHive_Inventory_Full.csv';
 const STORAGE_KEY    = 'ht_inventory';
 const TS_KEY         = 'ht_inventory_timestamp';
 const STATUS_KEY     = 'ht_statuses';       // { [vin]: 'staged'|'active'|'out_of_stock' }
@@ -193,24 +193,44 @@ function parseCSV(raw) {
     const vin = get('vin');
     if (!vin) continue;
 
+    // Price: prefer Price column, fall back to MSRP
+    const priceRaw = get('price') || get('msrp');
+
+    // Engine: prefer full Engine string, fall back to displacement + cylinders
+    const engineRaw = get('engine') ||
+      [get('enginedisplacement'), get('enginecylinderct') ? get('enginecylinderct') + '-cyl' : '']
+        .filter(Boolean).join(' ');
+
     const vehicle = {
       vin,
       stockNumber:    get('stocknumber'),
       year:           get('year'),
       make:           get('make'),
       model:          get('model'),
-      trim:           get('trim'),
-      price:          get('price'),
-      mileage:        get('mileage'),
-      exteriorColor:  get('exteriorcolor'),
+      trim:           get('series'),          // "Series" = trim level in this feed
+      trimDetail:     get('seriesdetail'),
+      condition:      get('newused'),          // "U" or "N"
+      price:          priceRaw,
+      msrp:           get('msrp'),
+      mileage:        get('odometer'),
+      exteriorColor:  get('colour'),
       interiorColor:  get('interiorcolor'),
-      engine:         get('engine'),
+      engine:         engineRaw,
+      engineDisp:     get('enginedisplacement'),
+      engineCyl:      get('enginecylinderct'),
       transmission:   get('transmission'),
-      fuelType:       get('fueltype'),
-      bodyStyle:      get('bodystyle'),
-      vehicleType:    get('vehicletype'),
+      drivetrain:     get('drivetraindesc'),
+      fuelType:       get('fuel'),
+      bodyStyle:      get('body'),
+      cityMpg:        get('citympg'),
+      hwyMpg:         get('highwaympg'),
+      dealerName:     get('dealername'),
+      dealerCity:     get('dealercity'),
+      dealerRegion:   get('dealerregion'),
+      daysOnLot:      get('age'),
+      certified:      get('certified'),
       // Pipe-delimited multi-value columns
-      images:         parsePipeList(get('images')),
+      images:         parsePipeList(get('photos')),
       features:       parsePipeList(get('features')),
       description:    get('description'),
     };
@@ -260,26 +280,39 @@ function parsePipeList(value) {
   return value.split('|').map(s => s.trim()).filter(Boolean);
 }
 
-// Column name aliases for flexible CSV layouts
+// Column name aliases — primary names match the AutoHive/GitHub feed exactly
+// (case-insensitive lookup is applied at parse time)
 const COLUMN_ALIASES = {
-  vin:           ['vin'],
-  stocknumber:   ['stock', 'stocknumber', 'stock_number', 'stock #', 'stock#'],
-  year:          ['year', 'modelyear', 'model_year'],
-  make:          ['make'],
-  model:         ['model'],
-  trim:          ['trim', 'trimlevel'],
-  price:         ['price', 'listprice', 'sellingprice', 'internet price'],
-  mileage:       ['mileage', 'miles', 'odometer'],
-  exteriorcolor: ['exteriorcolor', 'exterior_color', 'extcolor', 'color'],
-  interiorcolor: ['interiorcolor', 'interior_color', 'intcolor'],
-  engine:        ['engine', 'enginedescription'],
-  transmission:  ['transmission', 'trans'],
-  fueltype:      ['fueltype', 'fuel_type', 'fuel'],
-  bodystyle:     ['bodystyle', 'body_style', 'body'],
-  vehicletype:   ['vehicletype', 'vehicle_type', 'type'],
-  images:        ['images', 'imageurls', 'image_urls', 'photos', 'photourl'],
-  features:      ['features', 'options', 'equipment'],
-  description:   ['description', 'comments', 'notes'],
+  vin:               ['vin'],
+  stocknumber:       ['stock #', 'stock#', 'stock', 'stocknumber', 'stock_number'],
+  newused:           ['new/used', 'newused', 'condition', 'type'],
+  year:              ['year', 'modelyear', 'model_year'],
+  make:              ['make'],
+  model:             ['model'],
+  series:            ['series', 'trim', 'trimlevel', 'series detail'],
+  seriesdetail:      ['series detail', 'seriesdetail'],
+  body:              ['body', 'bodystyle', 'body_style', 'body style'],
+  transmission:      ['transmission', 'trans'],
+  odometer:          ['odometer', 'mileage', 'miles'],
+  enginecylinderct:  ['engine cylinder ct', 'enginecylinderct', 'cylinders'],
+  enginedisplacement:['engine displacement', 'enginedisplacement', 'displacement'],
+  drivetraindesc:    ['drivetrain desc', 'drivetraindesc', 'drivetrain'],
+  colour:            ['colour', 'color', 'exteriorcolor', 'exterior color', 'extcolor'],
+  interiorcolor:     ['interior color', 'interiorcolor', 'interior_color'],
+  price:             ['price', 'listprice', 'sellingprice', 'internet price'],
+  msrp:              ['msrp'],
+  certified:         ['certified'],
+  description:       ['description', 'comments', 'notes'],
+  features:          ['features', 'options', 'equipment'],
+  citympg:           ['city mpg', 'citympg', 'city'],
+  highwaympg:        ['highway mpg', 'highwaympg', 'hwy mpg', 'highway'],
+  photos:            ['photos', 'images', 'imageurls', 'image_urls', 'photourl'],
+  dealername:        ['dealer name', 'dealername'],
+  engine:            ['engine', 'enginedescription', 'engine description'],
+  fuel:              ['fuel', 'fueltype', 'fuel_type', 'fuel type'],
+  age:               ['age', 'days on lot', 'daysonlot'],
+  dealercity:        ['dealer city', 'dealercity'],
+  dealerregion:      ['dealer region', 'dealerregion', 'state'],
 };
 
 // ─── Vehicle status management ───────────────────────────────────────────────
