@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.ts";
 
 @layer base {
   :root {
@@ -29,17 +28,21 @@
 
 @layer base {
   * {
-    @apply border-border;
+    border-color: hsl(var(--border));
   }
   body {
-    @apply bg-hatchett-bg text-hatchett-text;
+    background-color: #1A1A1A;
+    color: #F5F5F5;
     font-feature-settings: "rlig" 1, "calt" 1;
   }
   input, textarea, select {
-    @apply bg-hatchett-bg border-[#444] text-hatchett-text;
+    background-color: #1A1A1A;
+    border-color: #444;
+    color: #F5F5F5;
   }
   input:focus, textarea:focus, select:focus {
-    @apply border-hatchett-orange outline-none;
+    border-color: #FF4500;
+    outline: none;
     box-shadow: 0 0 0 3px rgba(255, 69, 0, 0.4);
   }
 }
