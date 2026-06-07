@@ -1,10 +1,20 @@
 import { PrismaClient, Role } from '@prisma/client';
-import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3';
 import bcrypt from 'bcryptjs';
 
 const url = process.env.DATABASE_URL ?? 'file:./dev.db';
-const adapter = new PrismaBetterSqlite3({ url });
-const prisma = new PrismaClient({ adapter });
+
+function makeAdapter() {
+  if (url.startsWith('file:')) {
+    const { PrismaBetterSqlite3 } = require('@prisma/adapter-better-sqlite3');
+    return new PrismaBetterSqlite3({ url });
+  }
+  const { Pool } = require('pg');
+  const { PrismaPg } = require('@prisma/adapter-pg');
+  const pool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: false } });
+  return new PrismaPg(pool);
+}
+
+const prisma = new PrismaClient({ adapter: makeAdapter() });
 
 async function main() {
   console.log('Seeding database...');
